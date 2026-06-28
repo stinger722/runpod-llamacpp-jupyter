@@ -25,6 +25,8 @@ ENV TEMP=/workspace/tmp
 ENV TMP=/workspace/tmp
 ENV HF_XET_HIGH_PERFORMANCE=1
 
+RUN mkdir -p /workspace/tmp
+
 WORKDIR /opt
 
 ARG LLAMA_CPP_REF=master
