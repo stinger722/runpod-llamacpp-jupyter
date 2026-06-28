@@ -38,7 +38,7 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git \
 WORKDIR /opt/llama.cpp
 
 RUN cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build build --config Release
+    && cmake --build build --config Release --target llama-server
 
 RUN mkdir -p \
     /workspace/models \
