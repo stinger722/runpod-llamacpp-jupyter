@@ -37,7 +37,11 @@ RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git \
 
 WORKDIR /opt/llama.cpp
 
-RUN cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -B build -G Ninja \
+    -DGGML_CUDA=ON \
+    -DGGML_NATIVE=OFF \
+    "-DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" \
+    -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build --config Release --target llama-server
 
 RUN mkdir -p \
