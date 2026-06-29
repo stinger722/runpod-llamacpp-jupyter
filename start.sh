@@ -32,12 +32,23 @@ JUPYTER_PORT="${JUPYTER_PORT:-8888}"
 JUPYTER_IP="${JUPYTER_IP:-0.0.0.0}"
 JUPYTER_ROOT_DIR="${JUPYTER_ROOT_DIR:-/workspace}"
 
+ENABLE_MCP_FILESYSTEM="${ENABLE_MCP_FILESYSTEM:-1}"
+ENABLE_MCP_FETCH="${ENABLE_MCP_FETCH:-1}"
+ENABLE_MCP_BRAVE="${ENABLE_MCP_BRAVE:-0}"
+MCP_FILESYSTEM_PORT="${MCP_FILESYSTEM_PORT:-8091}"
+MCP_FETCH_PORT="${MCP_FETCH_PORT:-8092}"
+MCP_BRAVE_PORT="${MCP_BRAVE_PORT:-8093}"
+MCP_FILESYSTEM_INPUT_ROOT="/workspace/ai-readable/input"
+MCP_FILESYSTEM_OUTPUT_ROOT="/workspace/ai-readable/output"
+LLAMA_WEBUI_CONFIG_FILE="${LLAMA_WEBUI_CONFIG_FILE:-/workspace/llama-webui-config.json}"
+
 mkdir -p \
   "$MODEL_DIR" \
   "$PROJECTOR_DIR" \
   /workspace/models \
   /workspace/projectors \
-  /workspace/ai-readable \
+  "$MCP_FILESYSTEM_INPUT_ROOT" \
+  "$MCP_FILESYSTEM_OUTPUT_ROOT" \
   "$HF_HUB_CACHE" \
   "$HF_XET_CACHE" \
   /workspace/tmp
@@ -84,6 +95,83 @@ PY
   echo "$JUPYTER_PID" > /workspace/tmp/jupyter.pid
 }
 
+start_mcp_proxy() {
+  local name="$1"
+  local port="$2"
+  shift 2
+
+  if ! command -v mcp-proxy >/dev/null 2>&1; then
+    echo "WARNING: mcp-proxy command not found. Skipping MCP server: $name"
+    return 0
+  fi
+
+  echo "Starting MCP $name on port ${port}, endpoint=/mcp"
+  nohup mcp-proxy --port "$port" -- "$@" \
+    > "/workspace/${name}-mcp.log" 2>&1 &
+
+  local pid="$!"
+  echo "$pid" > "/workspace/tmp/${name}-mcp.pid"
+}
+
+start_mcp_servers() {
+  mkdir -p "$MCP_FILESYSTEM_INPUT_ROOT" "$MCP_FILESYSTEM_OUTPUT_ROOT" /workspace/tmp
+
+  if [ "$ENABLE_MCP_FILESYSTEM" = "1" ]; then
+    start_mcp_proxy \
+      "filesystem" \
+      "$MCP_FILESYSTEM_PORT" \
+      mcp-server-filesystem "$MCP_FILESYSTEM_INPUT_ROOT" "$MCP_FILESYSTEM_OUTPUT_ROOT"
+  else
+    echo "MCP filesystem disabled: ENABLE_MCP_FILESYSTEM=$ENABLE_MCP_FILESYSTEM"
+  fi
+
+  if [ "$ENABLE_MCP_FETCH" = "1" ]; then
+    start_mcp_proxy \
+      "fetch" \
+      "$MCP_FETCH_PORT" \
+      mcp-fetch-server
+  else
+    echo "MCP fetch disabled: ENABLE_MCP_FETCH=$ENABLE_MCP_FETCH"
+  fi
+
+  if [ "$ENABLE_MCP_BRAVE" = "1" ]; then
+    if [ -z "${BRAVE_API_KEY:-}" ]; then
+      echo "WARNING: ENABLE_MCP_BRAVE=1 but BRAVE_API_KEY is not set. Skipping MCP brave-search."
+    else
+      start_mcp_proxy \
+        "brave-search" \
+        "$MCP_BRAVE_PORT" \
+        mcp-server-brave-search
+    fi
+  else
+    echo "MCP brave-search disabled: ENABLE_MCP_BRAVE=$ENABLE_MCP_BRAVE"
+  fi
+}
+
+write_webui_config() {
+  local filesystem_enabled=false
+  local fetch_enabled=false
+  local brave_enabled=false
+
+  if [ "$ENABLE_MCP_FILESYSTEM" = "1" ]; then
+    filesystem_enabled=true
+  fi
+  if [ "$ENABLE_MCP_FETCH" = "1" ]; then
+    fetch_enabled=true
+  fi
+  if [ "$ENABLE_MCP_BRAVE" = "1" ] && [ -n "${BRAVE_API_KEY:-}" ]; then
+    brave_enabled=true
+  fi
+
+  cat > "$LLAMA_WEBUI_CONFIG_FILE" <<JSON
+{
+  "mcpServers": "[{\"id\":\"filesystem\",\"enabled\":${filesystem_enabled},\"name\":\"filesystem\",\"url\":\"http://127.0.0.1:${MCP_FILESYSTEM_PORT}/mcp\",\"requestTimeoutSeconds\":300,\"useProxy\":true},{\"id\":\"fetch\",\"enabled\":${fetch_enabled},\"name\":\"fetch\",\"url\":\"http://127.0.0.1:${MCP_FETCH_PORT}/mcp\",\"requestTimeoutSeconds\":300,\"useProxy\":true},{\"id\":\"brave-search\",\"enabled\":${brave_enabled},\"name\":\"brave-search\",\"url\":\"http://127.0.0.1:${MCP_BRAVE_PORT}/mcp\",\"requestTimeoutSeconds\":300,\"useProxy\":true}]"
+}
+JSON
+
+  echo "WebUI config written: $LLAMA_WEBUI_CONFIG_FILE"
+}
+
 find_first_gguf() {
   local dir="$1"
   local pattern="$2"
@@ -124,8 +212,13 @@ echo "GPU_LAYERS=$GPU_LAYERS"
 echo "PARALLEL=$PARALLEL"
 echo "HOST=$HOST"
 echo "PORT=$PORT"
+echo "ENABLE_MCP_FILESYSTEM=$ENABLE_MCP_FILESYSTEM"
+echo "ENABLE_MCP_FETCH=$ENABLE_MCP_FETCH"
+echo "ENABLE_MCP_BRAVE=$ENABLE_MCP_BRAVE"
 
+write_webui_config
 start_jupyter
+start_mcp_servers
 
 if [ -z "$MODEL_PATH" ]; then
   download_if_needed "$MODEL_REPO" "$MODEL_FILE" "$MODEL_DIR" "model"
@@ -170,6 +263,20 @@ if [ -n "$PARALLEL" ]; then
   EXTRA_ARGS+=(--parallel "$PARALLEL")
 fi
 
+if [ -f "$LLAMA_WEBUI_CONFIG_FILE" ]; then
+  EXTRA_ARGS+=(--ui-config-file "$LLAMA_WEBUI_CONFIG_FILE")
+fi
+
+if [ "$ENABLE_MCP_FILESYSTEM" = "1" ] || [ "$ENABLE_MCP_FETCH" = "1" ] || [ "$ENABLE_MCP_BRAVE" = "1" ]; then
+  case " $LLAMA_EXTRA_ARGS " in
+    *" --webui-mcp-proxy "*|*" --ui-mcp-proxy "*|*" --no-webui-mcp-proxy "*|*" --no-ui-mcp-proxy "*)
+      ;;
+    *)
+      EXTRA_ARGS+=(--webui-mcp-proxy)
+      ;;
+  esac
+fi
+
 # Optional raw extra arguments. Example:
 # LLAMA_EXTRA_ARGS='--jinja --cache-reuse 256'
 if [ -n "$LLAMA_EXTRA_ARGS" ]; then
@@ -181,6 +288,11 @@ cleanup() {
   if [ -f /workspace/tmp/jupyter.pid ]; then
     kill "$(cat /workspace/tmp/jupyter.pid)" >/dev/null 2>&1 || true
   fi
+  for pid_file in /workspace/tmp/*-mcp.pid; do
+    if [ -f "$pid_file" ]; then
+      kill "$(cat "$pid_file")" >/dev/null 2>&1 || true
+    fi
+  done
 }
 trap cleanup EXIT
 

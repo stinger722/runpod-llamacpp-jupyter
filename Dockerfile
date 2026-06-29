@@ -9,9 +9,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     ca-certificates \
+    gnupg \
     wget \
     openssl \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && node -v \
+    && npm -v \
+    && npx -v \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g \
+    mcp-proxy \
+    @modelcontextprotocol/server-filesystem \
+    @modelcontextprotocol/server-brave-search \
+    mcp-fetch-server \
+    && npm cache clean --force
 
 RUN pip install --no-cache-dir --upgrade \
     "huggingface_hub[cli,hf_xet]" \
@@ -50,7 +70,8 @@ RUN cmake -B build -G Ninja \
 RUN mkdir -p \
     /workspace/models \
     /workspace/projectors \
-    /workspace/ai-readable \
+    /workspace/ai-readable/input \
+    /workspace/ai-readable/output \
     /workspace/.cache/huggingface/hub \
     /workspace/.cache/huggingface/xet \
     /workspace/tmp
